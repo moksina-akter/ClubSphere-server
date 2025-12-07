@@ -79,6 +79,20 @@ async function run() {
       res.json(events);
     });
 
+    // GET single event by ID
+    app.get("/events/:id", async (req, res) => {
+      const id = req.params.id;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid event ID" });
+      }
+
+      const event = await eventCollection.findOne({ _id: new ObjectId(id) });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      res.json(event);
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
