@@ -76,7 +76,17 @@ async function run() {
       const clubs = await clubCollection.find({ status: "approved" }).toArray();
       res.json(clubs);
     });
-
+    // GET single club by ID
+    app.get("/club/:id", async (req, res) => {
+      const id = req.params.id;
+      try {
+        const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+        if (!club) return res.status(404).json({ message: "Club not found" });
+        res.json(club);
+      } catch {
+        res.status(400).json({ message: "Invalid club ID" });
+      }
+    });
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
