@@ -57,21 +57,10 @@ async function run() {
   try {
     const db = client.db("ClubSphereDb");
     const clubCollection = db.collection("club");
+    const eventCollection = db.collection("events");
+    const registrationCollection = db.collection("eventRegistrations");
 
-    // // GET all clubs
-    // app.get("/club", async (req, res) => {
-    //   const clubs = await clubCollection.find({ status: "approved" }).toArray();
-    //   res.json(clubs); // ✅ শুধু data array
-    // });
-
-    // // GET single club by ID
-    // app.get("/club/:id", async (req, res) => {
-    //   const id = req.params.id;
-    //   const club = await clubCollection.findOne({ _id: new ObjectId(id) });
-    //   if (!club) return res.status(404).json({ message: "Club not found" });
-    //   res.json(club);
-    // });
-
+    // GET all clubs
     app.get("/club", async (req, res) => {
       const clubs = await clubCollection.find({ status: "approved" }).toArray();
       res.json(clubs);
@@ -79,14 +68,17 @@ async function run() {
     // GET single club by ID
     app.get("/club/:id", async (req, res) => {
       const id = req.params.id;
-      try {
-        const club = await clubCollection.findOne({ _id: new ObjectId(id) });
-        if (!club) return res.status(404).json({ message: "Club not found" });
-        res.json(club);
-      } catch {
-        res.status(400).json({ message: "Invalid club ID" });
-      }
+      const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+      if (!club) return res.status(404).json({ message: "Club not found" });
+      res.json(club);
     });
+
+    // GET all events
+    app.get("/events", async (req, res) => {
+      const events = await eventCollection.find({}).toArray();
+      res.json(events);
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
