@@ -73,6 +73,17 @@ async function run() {
       res.json(club);
     });
 
+    //get 6 featuredclub
+    app.get("/featured-clubs", async (req, res) => {
+      const featured = await clubCollection
+        .find({ status: "approved" })
+        .sort({ createdAt: -1 })
+        .limit(6)
+        .toArray();
+
+      res.json(featured);
+    });
+
     // GET all events
     app.get("/events", async (req, res) => {
       const events = await eventCollection.find({}).toArray();
@@ -91,6 +102,33 @@ async function run() {
       if (!event) return res.status(404).json({ message: "Event not found" });
 
       res.json(event);
+    });
+    // POST register for an event
+    app.post("/events/:id/register", async (req, res) => {
+      const eventId = req.params.id;
+      const { userEmail, paymentId } = req.body;
+
+      if (!ObjectId.isValid(eventId)) {
+        return res.status(400).json({ message: "Invalid event ID" });
+      }
+
+      const event = await eventCollection.findOne({
+        _id: new ObjectId(eventId),
+      });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      const registration = await registrationCollection.insertOne({
+        eventId: new ObjectId(eventId),
+        clubId: event.clubId,
+        userEmail,
+        status: "registered",
+        paymentId: paymentId || null,
+        registeredAt: new Date(),
+      });
+
+      res
+        .status(201)
+        .json({ message: "Registered successfully", registration });
     });
 
     // Send a ping to confirm a successful connection
