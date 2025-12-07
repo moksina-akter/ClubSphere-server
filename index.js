@@ -1,9 +1,9 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const admin = require("firebase-admin");
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 5000;
 // const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
 //   "utf-8"
 // );
@@ -55,8 +55,26 @@ const client = new MongoClient(uri, {
 });
 async function run() {
   try {
-    app.get("/", (req, res) => {
-      res.send("My clubsphere going onnnnnnnnn..");
+    const db = client.db("ClubSphereDb");
+    const clubCollection = db.collection("club");
+
+    // // GET all clubs
+    // app.get("/club", async (req, res) => {
+    //   const clubs = await clubCollection.find({ status: "approved" }).toArray();
+    //   res.json(clubs); // ✅ শুধু data array
+    // });
+
+    // // GET single club by ID
+    // app.get("/club/:id", async (req, res) => {
+    //   const id = req.params.id;
+    //   const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+    //   if (!club) return res.status(404).json({ message: "Club not found" });
+    //   res.json(club);
+    // });
+
+    app.get("/club", async (req, res) => {
+      const clubs = await clubCollection.find({ status: "approved" }).toArray();
+      res.json(clubs);
     });
 
     // Send a ping to confirm a successful connection
