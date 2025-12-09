@@ -2,19 +2,13 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const admin = require("firebase-admin");
+// const admin = require("firebase-admin");
+const stripe = require("stripe")(process.env.STRIPE_SECRETS);
+
 const port = process.env.PORT || 5000;
-
-// const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
-//   "utf-8"
-// );
-// const serviceAccount = JSON.parse(decoded);
-// admin.initializeApp({
-//   credential: admin.credential.cert(serviceAccount),
-// });
-
 const app = express();
-// middleware
+
+// Middleware
 app.use(
   cors({
     origin: ["http://localhost:5173", "http://localhost:5174"],
@@ -24,25 +18,39 @@ app.use(
 );
 app.use(express.json());
 
-// jwt middlewares
+// var serviceAccount = require("./clubsphere-firebase-adminsdk.json");
+
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+// });
+
+// Firebase Admin Initialization
+// const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+//   "utf-8"
+// );
+// const serviceAccount = JSON.parse(decoded);
+
+// admin.initializeApp({
+//   credential: admin.credential.cert(serviceAccount),
+// });
+
+// JWT Middleware for secure routes
 // const verifyJWT = async (req, res, next) => {
 //   const token = req?.headers?.authorization?.split(" ")[1];
-//   console.log(token);
 //   if (!token) return res.status(401).send({ message: "Unauthorized Access!" });
+
 //   try {
-//     const decoded = await admin.auth().verifyIdToken(token);
-//     req.tokenEmail = decoded.email;
-//     console.log(decoded);
+//     const decodedToken = await admin.auth().verifyIdToken(token);
+//     req.userEmail = decodedToken.email;
+//     console.log(decodedToken);
 //     next();
 //   } catch (err) {
-//     console.log(err);
 //     return res.status(401).send({ message: "Unauthorized Access!", err });
 //   }
 // };
 
+// MongoDB Connection
 const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/?appName=Cluster0`;
-const stripe = require("stripe")(process.env.STRIPE_SECRETS);
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -50,239 +58,202 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   },
 });
+
 async function run() {
-  try {
-    const db = client.db("ClubSphereDb");
-    const clubCollection = db.collection("club");
-    const eventCollection = db.collection("events");
-    const userCollection = db.collection("users");
-    const paymentCollection = db.collection("payments");
-    const registrationCollection = db.collection("eventRegistrations");
-    const membershipsCollection = db.collection("memberships");
+  const db = client.db("ClubSphereDb");
+  const clubCollection = db.collection("club");
+  const eventCollection = db.collection("events");
+  const userCollection = db.collection("users");
+  const paymentCollection = db.collection("payments");
+  const registrationCollection = db.collection("eventRegistrations");
+  const membershipsCollection = db.collection("memberships");
 
-    //users collection
-    app.post("/users", async (req, res) => {
-      const user = req.body;
+  // Users
+  app.post("/users", async (req, res) => {
+    const user = req.body;
+    if (!user?.email)
+      return res.status(400).json({ message: "Email required" });
 
-      if (!user?.email) {
-        return res.status(400).json({ message: "Email is required" });
-      }
+    const existingUser = await userCollection.findOne({ email: user.email });
+    if (existingUser) return res.status(409).json({ message: "User exists" });
 
-      // check if user already exists
-      const existingUser = await userCollection.findOne({ email: user.email });
-      if (existingUser) {
-        return res.status(409).json({ message: "User already exists" });
-      }
-
-      const result = await userCollection.insertOne(user);
-      res.status(201).json({
-        message: "User created successfully",
-        userId: result.insertedId,
-      });
+    const result = await userCollection.insertOne({
+      ...user,
+      role: "member",
+      createdAt: new Date(),
     });
-    // GET all clubs
-    app.get("/club", async (req, res) => {
-      const clubs = await clubCollection.find({ status: "approved" }).toArray();
-      res.json(clubs);
-    });
-    // GET single club by ID
-    app.get("/club/:id", async (req, res) => {
-      const id = req.params.id;
-      const club = await clubCollection.findOne({ _id: new ObjectId(id) });
-      if (!club) return res.status(404).json({ message: "Club not found" });
-      res.json(club);
-    });
+    res
+      .status(201)
+      .json({ message: "User created", userId: result.insertedId });
+  });
 
-    //get 6 featuredclub
-    app.get("/featured-clubs", async (req, res) => {
-      const featured = await clubCollection
-        .find({ status: "approved" })
-        .sort({ createdAt: -1 })
-        .limit(6)
-        .toArray();
+  // Get all clubs
+  app.get("/club", async (req, res) => {
+    const clubs = await clubCollection.find({ status: "approved" }).toArray();
+    res.json(clubs);
+  });
 
-      res.json(featured);
-    });
+  // Get single club
+  app.get("/club/:id", async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id))
+      return res.status(400).json({ message: "Invalid club ID" });
 
-    // GET all events
-    app.get("/events", async (req, res) => {
-      const events = await eventCollection.find({}).toArray();
-      res.json(events);
-    });
+    const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+    if (!club) return res.status(404).json({ message: "Club not found" });
 
-    // GET single event by ID
-    app.get("/events/:id", async (req, res) => {
-      const id = req.params.id;
+    res.json(club);
+  });
 
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({ message: "Invalid event ID" });
-      }
+  // Featured clubs
+  app.get("/featured-clubs", async (req, res) => {
+    const featured = await clubCollection
+      .find({ status: "approved" })
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .toArray();
+    res.json(featured);
+  });
 
-      const event = await eventCollection.findOne({ _id: new ObjectId(id) });
-      if (!event) return res.status(404).json({ message: "Event not found" });
+  // Get all events
+  app.get("/events", async (req, res) => {
+    const events = await eventCollection.find({}).toArray();
+    res.json(events);
+  });
 
-      res.json(event);
-    });
-    // POST register for an event
-    app.post("/events/:id/register", async (req, res) => {
-      const eventId = req.params.id;
-      const { userEmail, paymentId } = req.body;
+  // Get single event
+  app.get("/events/:id", async (req, res) => {
+    const id = req.params.id;
+    if (!ObjectId.isValid(id))
+      return res.status(400).json({ message: "Invalid event ID" });
 
-      if (!ObjectId.isValid(eventId)) {
-        return res.status(400).json({ message: "Invalid event ID" });
-      }
+    const event = await eventCollection.findOne({ _id: new ObjectId(id) });
+    if (!event) return res.status(404).json({ message: "Event not found" });
 
-      const event = await eventCollection.findOne({
-        _id: new ObjectId(eventId),
-      });
-      if (!event) return res.status(404).json({ message: "Event not found" });
+    res.json(event);
+  });
 
-      const registration = await registrationCollection.insertOne({
-        eventId: new ObjectId(eventId),
-        clubId: event.clubId,
-        userEmail,
-        status: "registered",
-        paymentId: paymentId || null,
-        registeredAt: new Date(),
-      });
+  // Event registration
+  app.post("/events/:id/register", async (req, res) => {
+    const eventId = req.params.id;
+    const { paymentId } = req.body;
+    if (!ObjectId.isValid(eventId))
+      return res.status(400).json({ message: "Invalid event ID" });
 
-      res
-        .status(201)
-        .json({ message: "Registered successfully", registration });
+    const event = await eventCollection.findOne({ _id: new ObjectId(eventId) });
+    if (!event) return res.status(404).json({ message: "Event not found" });
+
+    const registration = await registrationCollection.insertOne({
+      eventId: new ObjectId(eventId),
+      clubId: event.clubId,
+      userEmail: req.userEmail,
+      status: "registered",
+      paymentId: paymentId || null,
+      registeredAt: new Date(),
     });
 
-    //payment
-    app.get("/payments", async (req, res) => {
-      const email = req.query.email;
-      let query = {};
+    res.status(201).json({ message: "Registered successfully", registration });
+  });
 
-      if (email) {
-        query.userEmail = email;
-      }
+  // Payments
+  app.get("/payments", async (req, res) => {
+    const email = req.query.email || req.userEmail;
+    const query = email ? { userEmail: email } : {};
+    const result = await paymentCollection.find(query).toArray();
+    res.send(result);
+  });
 
-      const result = await paymentCollection.find(query).toArray();
-      res.send(result);
-    });
-    //stripe
-    app.post("/create-checkout-session", async (req, res) => {
-      const { clubId, clubName, membershipFee, userEmail } = req.body;
+  // Stripe checkout session
+  app.post("/create-checkout-session", async (req, res) => {
+    const { clubId, clubName, membershipFee } = req.body;
+    const amount = parseInt(membershipFee) * 100;
 
-      const amount = parseInt(membershipFee) * 100; // stripe শুধু cents নেয়
-
-      const session = await stripe.checkout.sessions.create({
-        line_items: [
-          {
-            price_data: {
-              currency: "usd",
-              unit_amount: amount,
-              product_data: {
-                name: `${clubName} Membership Fee`,
-              },
-            },
-            quantity: 1,
+    const session = await stripe.checkout.sessions.create({
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            unit_amount: amount,
+            product_data: { name: `${clubName} Membership Fee` },
           },
-        ],
-        mode: "payment",
-
-        metadata: {
-          clubId,
-          clubName,
-          userEmail,
+          quantity: 1,
         },
-
-        customer_email: userEmail,
-
-        success_url: `${process.env.CLIENT_URL}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${process.env.CLIENT_URL}/dashboard/payment-cancelled`,
-      });
-
-      res.send({ url: session.url });
+      ],
+      mode: "payment",
+      metadata: { clubId, clubName, userEmail: req.userEmail },
+      customer_email: req.userEmail,
+      success_url: `${process.env.CLIENT_URL}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.CLIENT_URL}/dashboard/payment-cancelled`,
     });
 
-    //paymentsuccess
-    app.patch("/payment-success", async (req, res) => {
-      const sessionId = req.query.session_id;
+    res.send({ url: session.url });
+  });
 
-      if (!sessionId) {
-        return res.status(400).send({ error: "Missing session_id" });
-      }
+  // Stripe payment success
+  app.patch("/payment-success", async (req, res) => {
+    const sessionId = req.query.session_id;
+    if (!sessionId)
+      return res.status(400).send({ error: "Missing session_id" });
 
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (!session || !session.metadata)
+      return res.status(400).send({ error: "Invalid session data" });
+    if (session.payment_status !== "paid") return res.send({ success: false });
 
-      if (!session || !session.metadata) {
-        return res.status(400).send({ error: "Invalid session data" });
-      }
-
-      // Payment MUST be paid
-      if (session.payment_status !== "paid") {
-        return res.send({ success: false });
-      }
-
-      const transactionId = session.payment_intent;
-
-      // Prevent duplicate payments
-      const existing = await paymentCollection.findOne({ transactionId });
-      if (existing) {
-        return res.send({
-          success: true,
-          message: "Payment already processed",
-          transactionId,
-        });
-      }
-
-      // Extract data
-      const { clubId, clubName, userEmail } = session.metadata;
-
-      // Create membership record
-      const membershipData = {
-        userEmail,
-        clubId,
-        status: "active",
-        paymentId: transactionId,
-        joinedAt: new Date(),
-      };
-
-      const membershipResult = await membershipsCollection.insertOne(
-        membershipData
-      );
-
-      // Save to payments collection
-      const paymentData = {
-        userEmail,
-        amount: session.amount_total,
-        clubId,
-        clubName,
-        type: "membership",
-        transactionId,
-        status: session.payment_status,
-        createdAt: new Date(),
-      };
-
-      const paymentResult = await paymentCollection.insertOne(paymentData);
-
-      res.send({
+    const transactionId = session.payment_intent;
+    const existing = await paymentCollection.findOne({ transactionId });
+    if (existing)
+      return res.send({
         success: true,
-        membership: membershipResult,
-        payment: paymentResult,
+        message: "Payment already processed",
         transactionId,
       });
-    });
 
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
+    const { clubId, clubName, userEmail } = session.metadata;
+
+    const membershipData = {
+      userEmail,
+      clubId,
+      status: "active",
+      paymentId: transactionId,
+      joinedAt: new Date(),
+    };
+    const membershipResult = await membershipsCollection.insertOne(
+      membershipData
     );
-  } finally {
-    // Ensures that the client will close when you finish/error
-  }
+
+    const paymentData = {
+      userEmail,
+      amount: session.amount_total,
+      clubId,
+      clubName,
+      type: "membership",
+      transactionId,
+      status: session.payment_status,
+      createdAt: new Date(),
+    };
+    const paymentResult = await paymentCollection.insertOne(paymentData);
+
+    res.send({
+      success: true,
+      membership: membershipResult,
+      payment: paymentResult,
+      transactionId,
+    });
+  });
+  // Get user by email
+  app.get("/users/:email", async (req, res) => {
+    const email = req.params.email;
+    const user = await userCollection.findOne({ email });
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user); // role সহ সব info return করবে
+  });
+
+  await client.db("admin").command({ ping: 1 });
+  console.log("Connected to MongoDB successfully!");
 }
+
 run().catch(console.dir);
 
-app.get("/", (req, res) => {
-  res.send("My clubsphere going onnnnnnnnn..");
-});
-
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
+app.get("/", (req, res) => res.send("My ClubSphere server is running..."));
+app.listen(port, () => console.log(`Server running on port ${port}`));
