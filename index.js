@@ -259,6 +259,7 @@ async function run() {
       transactionId,
     });
   });
+
   // GET member overview stats
   app.get("/member-overview", async (req, res) => {
     const email = req.query.email;
@@ -297,6 +298,37 @@ async function run() {
     });
   });
 
+  // GET events registered by a user
+  app.get("/event-registrations", async (req, res) => {
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ message: "Email required" });
+
+    const registrations = await registrationCollection
+      .find({ userEmail: email, status: "registered" })
+      .toArray();
+
+    const detailedRegs = await Promise.all(
+      registrations.map(async (reg) => {
+        const event = await eventCollection.findOne({
+          _id: new ObjectId(reg.eventId),
+        });
+        const club = await clubCollection.findOne({
+          _id: new ObjectId(event.clubId),
+        });
+        return {
+          ...reg,
+          eventTitle: event?.title,
+          eventDate: event?.eventDate,
+          clubName: club?.clubName,
+          clubId: club?._id,
+        };
+      })
+    );
+
+    res.status(200).json(detailedRegs);
+  });
+
+  //-----------------------------------------------
   await client.db("admin").command({ ping: 1 });
   console.log("Connected to MongoDB successfully!");
 }
