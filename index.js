@@ -328,6 +328,33 @@ async function run() {
     res.status(200).json(detailedRegs);
   });
 
+  // GET active memberships for a user
+  app.get("/memberships", async (req, res) => {
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ message: "Email required" });
+
+    const memberships = await membershipsCollection
+      .find({ userEmail: email, status: "active" })
+      .toArray();
+
+    // join with club info
+    const detailedMemberships = await Promise.all(
+      memberships.map(async (m) => {
+        const club = await clubCollection.findOne({
+          _id: new ObjectId(m.clubId),
+        });
+        return {
+          ...m,
+          clubName: club?.clubName,
+          location: club?.location,
+          membershipFee: club?.membershipFee,
+        };
+      })
+    );
+
+    res.status(200).json(detailedMemberships);
+  });
+
   //-----------------------------------------------
   await client.db("admin").command({ ping: 1 });
   console.log("Connected to MongoDB successfully!");
