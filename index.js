@@ -68,7 +68,25 @@ async function run() {
   const registrationCollection = db.collection("eventRegistrations");
   const membershipsCollection = db.collection("memberships");
 
-  // Users
+  // Get user by email
+  app.get("/users/:email", async (req, res) => {
+    const email = req.params.email;
+
+    const user = await userCollection.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      name: user.name,
+      email: user.email,
+      role: user.role || "member",
+      photoURL: user.photoURL,
+      createdAt: user.createdAt,
+    });
+  });
+
   app.post("/users", async (req, res) => {
     const user = req.body;
     if (!user?.email)
@@ -241,12 +259,42 @@ async function run() {
       transactionId,
     });
   });
-  // Get user by email
-  app.get("/users/:email", async (req, res) => {
-    const email = req.params.email;
-    const user = await userCollection.findOne({ email });
-    if (!user) return res.status(404).json({ message: "User not found" });
-    res.json(user); // role সহ সব info return করবে
+  // GET member overview stats
+  app.get("/member-overview", async (req, res) => {
+    const email = req.query.email;
+    if (!email) return res.status(400).json({ message: "Email required" });
+
+    const memberships = await membershipsCollection
+      .find({ userEmail: email, status: "active" })
+      .toArray();
+
+    const registrations = await registrationCollection
+      .find({ userEmail: email, status: "registered" })
+      .toArray();
+
+    const upcomingEvents = await Promise.all(
+      registrations.map(async (reg) => {
+        const event = await eventCollection.findOne({
+          _id: new ObjectId(reg.eventId),
+        });
+        if (new Date(event.eventDate) >= new Date()) {
+          const club = await clubCollection.findOne({
+            _id: new ObjectId(event.clubId),
+          });
+          return {
+            eventTitle: event.title,
+            eventDate: event.eventDate,
+            clubName: club.clubName,
+          };
+        }
+      })
+    );
+
+    res.status(200).json({
+      totalClubsJoined: memberships.length,
+      totalEventsRegistered: registrations.length,
+      upcomingEvents: upcomingEvents.filter(Boolean), // remove undefined
+    });
   });
 
   await client.db("admin").command({ ping: 1 });
