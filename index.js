@@ -35,7 +35,11 @@ const verifyToken = async (req, res, next) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = await admin.auth().verifyIdToken(token);
+    console.log(decoded);
     req.decoded = decoded; // user info available
+    if (req.path.startsWith("/manager") && decoded.role !== "manager") {
+      return res.status(403).json({ message: "Forbidden: Manager only" });
+    }
     next();
   } catch (err) {
     console.error(err);
@@ -44,7 +48,10 @@ const verifyToken = async (req, res, next) => {
 };
 
 // MongoDB Connection
-const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/?appName=Cluster0`;
+const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/ClubSphereDb?retryWrites=true&w=majority`;
+
+// const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/?appName=Cluster0`;
+
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -86,30 +93,48 @@ async function run() {
       name: user.name,
       email: user.email,
       role: user.role || "member",
+      uid: user.uid || null,
       photoURL: user.photoURL,
       createdAt: user.createdAt,
     });
   });
 
-  app.post("/users", async (req, res) => {
-    const user = req.body;
-    if (!user?.email)
-      return res.status(400).json({ message: "Email required" });
+  app.post("/users", verifyToken, async (req, res) => {
+    const { email, uid, name, photoURL } = req.body;
+    if (!email || !uid)
+      return res.status(400).json({ message: "Email & UID required" });
 
-    const existingUser = await userCollection.findOne({ email: user.email });
-    if (existingUser) return res.status(409).json({ message: "User exists" });
+    let firebaseUser;
+    try {
+      firebaseUser = await admin.auth().getUser(uid);
 
-    const result = await userCollection.insertOne({
-      ...user,
-      role: "member",
-      createdAt: new Date(),
-    });
-    res
-      .status(201)
-      .json({ message: "User created", userId: result.insertedId });
+      let user = await userCollection.findOne({ uid });
+      let result;
+      if (!user) {
+        console.log("5. User not found in MongoDB. Inserting...");
+        result = await userCollection.insertOne({
+          name: name || firebaseUser?.displayName || "",
+          email,
+          photoURL: photoURL || firebaseUser?.photoURL || "",
+          uid,
+          role: "member",
+          createdAt: new Date(),
+        });
+        console.log("6. Insertion successful. ID:", result.insertedId);
+        user = await userCollection.findOne({ _id: result.insertedId });
+      } else {
+        console.log("User already exists in MongoDB:", user._id);
+      }
+
+      res
+        .status(201)
+        .json({ message: "User created/fetched successfully", user });
+    } catch (err) {
+      console.error("Error in /users route:", err);
+      res.status(500).json({ message: "Server error" });
+    }
   });
 
-  // Clubs
   app.get("/club", async (req, res) => {
     const clubs = await clubCollection.find({ status: "approved" }).toArray();
     res.json(clubs);
@@ -460,6 +485,7 @@ async function run() {
       res.status(500).json({ message: "Internal server error" });
     }
   });
+
   // Manager overview
   app.get("/manager/overview", verifyToken, async (req, res) => {
     const email = req.query.email;
@@ -645,6 +671,30 @@ async function run() {
     );
 
     res.json(result);
+  });
+
+  //admin approved
+  app.post("/admin/approve-manager/:uid", verifyToken, async (req, res) => {
+    const adminUser = req.decoded;
+
+    if (adminUser.role !== "admin") {
+      return res.status(403).json({ message: "Forbidden: Admin only" });
+    }
+
+    const uid = req.params.uid;
+
+    try {
+      // Firebase তে role update
+      await admin.auth().setCustomUserClaims(uid, { role: "manager" });
+
+      // Database তে role update
+      await userCollection.updateOne({ uid }, { $set: { role: "manager" } });
+
+      res.json({ message: "User approved as manager successfully" });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Failed to approve manager" });
+    }
   });
 
   // Test
