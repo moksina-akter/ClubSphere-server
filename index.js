@@ -492,6 +492,161 @@ async function run() {
     });
   });
 
+  // Get clubs managed by this manager
+  app.get("/manager/my-clubs", verifyToken, async (req, res) => {
+    const email = req.query.email;
+    if (req.decoded.email !== email || req.decoded.role !== "manager")
+      return res.status(403).send("Forbidden");
+
+    const clubs = await clubCollection.find({ managerEmail: email }).toArray();
+    res.json(clubs);
+  });
+  // Create a new club
+  app.post("/manager/create-club", verifyToken, async (req, res) => {
+    const { clubName, location, managerEmail } = req.body;
+    if (req.decoded.email !== managerEmail || req.decoded.role !== "manager")
+      return res.status(403).send("Forbidden");
+
+    const newClub = {
+      clubName,
+      location,
+      managerEmail,
+      status: "pending", // admin will approve
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await clubCollection.insertOne(newClub);
+    res.json(result);
+  });
+  // Get events for manager's clubs
+  app.get("/manager/my-events", verifyToken, async (req, res) => {
+    const email = req.query.email;
+    if (req.decoded.email !== email || req.decoded.role !== "manager")
+      return res.status(403).send("Forbidden");
+
+    // Find all clubs by this manager
+    const clubs = await clubCollection.find({ managerEmail: email }).toArray();
+    const clubIds = clubs.map((c) => c._id);
+
+    // Fetch events for these clubs
+    const events = await eventCollection
+      .find({ clubId: { $in: clubIds } })
+      .toArray();
+    res.json(events);
+  });
+
+  // Create event
+  app.post("/manager/create-event", verifyToken, async (req, res) => {
+    const {
+      title,
+      description,
+      eventDate,
+      location,
+      isPaid,
+      eventFee,
+      managerEmail,
+    } = req.body;
+
+    if (req.decoded.email !== managerEmail || req.decoded.role !== "manager")
+      return res.status(403).send("Forbidden");
+
+    // Find a club by this manager to link
+    const club = await clubCollection.findOne({ managerEmail });
+    if (!club) return res.status(404).send("Club not found");
+
+    const newEvent = {
+      clubId: club._id,
+      title,
+      description,
+      eventDate: new Date(eventDate),
+      location,
+      isPaid,
+      eventFee: isPaid ? eventFee : 0,
+      createdAt: new Date(),
+    };
+
+    const result = await eventCollection.insertOne(newEvent);
+    res.json(result);
+  });
+  // Get registrations for manager's events
+  app.get("/manager/event-registrations", verifyToken, async (req, res) => {
+    const email = req.query.email;
+    if (req.decoded.email !== email || req.decoded.role !== "manager")
+      return res.status(403).send("Forbidden");
+
+    // Get manager's clubs
+    const clubs = await clubCollection.find({ managerEmail: email }).toArray();
+    const clubIds = clubs.map((c) => c._id);
+
+    // Get events for these clubs
+    const events = await eventCollection
+      .find({ clubId: { $in: clubIds } })
+      .toArray();
+    const eventIds = events.map((e) => e._id);
+
+    // Get registrations for these events
+    const registrations = await eventRegistrationsCollection
+      .find({ eventId: { $in: eventIds } })
+      .toArray();
+
+    // Add event title for display
+    const registrationsWithEvent = registrations.map((reg) => {
+      const event = events.find(
+        (e) => e._id.toString() === reg.eventId.toString()
+      );
+      return {
+        ...reg,
+        eventTitle: event?.title || "Unknown Event",
+      };
+    });
+
+    res.json(registrationsWithEvent);
+  });
+
+  // Update registration status
+  app.put("/manager/event-registrations/:id", verifyToken, async (req, res) => {
+    const registrationId = req.params.id;
+    const { status } = req.body;
+
+    const reg = await eventRegistrationsCollection.findOne({
+      _id: new ObjectId(registrationId),
+    });
+
+    if (!reg) return res.status(404).send("Registration not found");
+
+    // Check if manager owns the club
+    const club = await clubCollection.findOne({
+      _id: new ObjectId(reg.clubId),
+    });
+    if (req.decoded.email !== club.managerEmail)
+      return res.status(403).send("Forbidden");
+
+    const result = await eventRegistrationsCollection.updateOne(
+      { _id: new ObjectId(registrationId) },
+      { $set: { status } }
+    );
+    res.json(result);
+  });
+
+  // Update club
+  app.put("/manager/my-clubs/:id", verifyToken, async (req, res) => {
+    const clubId = req.params.id;
+    const updateData = req.body;
+
+    const club = await clubCollection.findOne({ _id: new ObjectId(clubId) });
+    if (!club) return res.status(404).send("Club not found");
+    if (req.decoded.email !== club.managerEmail)
+      return res.status(403).send("Forbidden");
+
+    const result = await clubCollection.updateOne(
+      { _id: new ObjectId(clubId) },
+      { $set: updateData }
+    );
+
+    res.json(result);
+  });
+
   // Test
   await client.db("admin").command({ ping: 1 });
   console.log("Connected to MongoDB successfully!");
