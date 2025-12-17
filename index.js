@@ -26,31 +26,7 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-const verifyToken = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-
-  const token = authHeader.split(" ")[1];
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    console.log(decoded);
-    req.decoded = decoded; // user info available
-    if (req.path.startsWith("/manager") && decoded.role !== "manager") {
-      return res.status(403).json({ message: "Forbidden: Manager only" });
-    }
-    next();
-  } catch (err) {
-    console.error(err);
-    return res.status(401).json({ message: "Invalid or expired token" });
-  }
-};
-
-// MongoDB Connection
 const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/ClubSphereDb?retryWrites=true&w=majority`;
-
-// const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.cdbx9rd.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -71,7 +47,6 @@ async function run() {
 
   // Get all clubs
   const clubs = await clubCollection.find({}).toArray();
-  // Loop over events
   const events = await eventCollection.find({}).toArray();
   for (let event of events) {
     const club = clubs.find((c) => c.clubName === event.clubId); // event.clubId এখন string
@@ -83,6 +58,53 @@ async function run() {
       console.log(`Updated event ${event.title}`);
     }
   }
+  const verifyToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    try {
+      const decoded = await admin.auth().verifyIdToken(token);
+      const user = await userCollection.findOne({ email: decoded.email });
+      if (!user) return res.status(403).json({ message: "Forbidden" });
+
+      req.decoded = user;
+      next();
+    } catch (err) {
+      console.error(err);
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+  };
+  // Verify admin role
+  const verifyAdmin = (req, res, next) => {
+    if (req.decoded.role !== "admin") {
+      console.log("Forbidden! decoded token:", req.decoded);
+      return res.status(403).json({ message: "Forbidden: Admin only" });
+    }
+    next();
+  };
+  const verifyManager = (req, res, next) => {
+    if (req.decoded.role !== "clubManager") {
+      return res.status(403).json({ message: "Forbidden: Manager only" });
+    }
+    next();
+  };
+  app.post("/refresh-token", verifyToken, async (req, res) => {
+    try {
+      const uid = req.decoded.uid;
+      const userRecord = await admin.auth().getUser(uid);
+      const customClaims = userRecord.customClaims || {};
+
+      const token = await admin.auth().createCustomToken(uid, customClaims);
+
+      res.json({ token, role: customClaims.role || "member" });
+    } catch (err) {
+      console.error("Error refreshing token:", err);
+      res.status(500).json({ message: "Token refresh failed" });
+    }
+  });
   // Users
   app.get("/users/:email", async (req, res) => {
     const email = req.params.email;
@@ -177,9 +199,10 @@ async function run() {
     res.json(event);
   });
 
-  app.post("/events/:id/register", async (req, res) => {
+  app.post("/events/:id/register", verifyToken, async (req, res) => {
     const eventId = req.params.id;
-    const { paymentId, userEmail } = req.body;
+    const userEmail = req.decoded.email;
+    const { paymentId } = req.body;
 
     if (!ObjectId.isValid(eventId))
       return res.status(400).json({ message: "Invalid event ID" });
@@ -245,7 +268,7 @@ async function run() {
   });
 
   // Payments
-  app.get("/payments", async (req, res) => {
+  app.get("/payments", verifyToken, async (req, res) => {
     const email = req.query.email;
     const result = email
       ? await paymentCollection.find({ userEmail: email }).toArray()
@@ -295,11 +318,12 @@ async function run() {
       transactionId,
     });
   });
+
   // Stripe checkout session
-  app.post("/create-checkout-session", async (req, res) => {
+  app.post("/create-checkout-session", verifyToken, async (req, res) => {
     const { clubId, clubName, membershipFee } = req.body;
     const amount = parseInt(membershipFee) * 100;
-
+    const userEmail = req.decoded.email;
     const session = await stripe.checkout.sessions.create({
       line_items: [
         {
@@ -312,17 +336,18 @@ async function run() {
         },
       ],
       mode: "payment",
-      metadata: { clubId, clubName, userEmail: req.userEmail },
-      customer_email: req.userEmail,
+      metadata: { clubId, clubName, userEmail },
+      customer_email: userEmail,
       success_url: `${process.env.CLIENT_URL}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_URL}/dashboard/payment-cancelled`,
     });
 
     res.send({ url: session.url });
   });
+
   // Member overview
-  app.get("/member-overview", async (req, res) => {
-    const email = req.query.email;
+  app.get("/member-overview", verifyToken, async (req, res) => {
+    const email = req.decoded.email;
     const memberships = await membershipsCollection
       .find({ userEmail: email, status: "active" })
       .toArray();
@@ -381,9 +406,9 @@ async function run() {
     res.json(clubs);
   });
 
-  app.get("/member/my-events", async (req, res) => {
+  app.get("/member/my-events", verifyToken, async (req, res) => {
     try {
-      const email = req.query.email;
+      const email = req.decoded.email;
       if (!email) return res.status(400).json({ message: "Email required" });
 
       const registrations = await registrationCollection
@@ -425,7 +450,7 @@ async function run() {
       res.status(500).json({ message: "Internal server error" });
     }
   });
-  app.get("/member/upcoming-events", async (req, res) => {
+  app.get("/member/upcoming-events", verifyToken, async (req, res) => {
     try {
       const email = req.query.email;
       if (!email) return res.status(400).json({ message: "Email required" });
@@ -469,9 +494,9 @@ async function run() {
   });
 
   // Member payments
-  app.get("/member/payments", async (req, res) => {
+  app.get("/member/payments", verifyToken, async (req, res) => {
     try {
-      const email = req.query.email;
+      const email = req.decoded.email;
       if (!email) return res.status(400).json({ message: "Email required" });
 
       const payments = await paymentCollection
@@ -487,11 +512,9 @@ async function run() {
   });
 
   // Manager overview
-  app.get("/manager/overview", verifyToken, async (req, res) => {
-    const email = req.query.email;
+  app.get("/manager/overview", verifyToken, verifyManager, async (req, res) => {
+    const email = req.decoded.email;
     const user = req.decoded;
-
-    if (user.role !== "manager") return res.status(403).send("Forbidden");
 
     const clubs = await clubCollection.find({ managerEmail: email }).toArray();
     const clubIds = clubs.map((c) => c._id);
@@ -500,11 +523,11 @@ async function run() {
       clubId: { $in: clubIds },
     });
 
-    const totalEvents = await eventsCollection.countDocuments({
+    const totalEvents = await eventCollection.countDocuments({
       clubId: { $in: clubIds },
     });
 
-    const payments = await paymentsCollection
+    const payments = await paymentCollection
       .find({ clubId: { $in: clubIds } })
       .toArray();
 
@@ -517,88 +540,174 @@ async function run() {
       totalPayments,
     });
   });
-
-  // Get clubs managed by this manager
-  app.get("/manager/my-clubs", verifyToken, async (req, res) => {
-    const email = req.query.email;
-    if (req.decoded.email !== email || req.decoded.role !== "manager")
-      return res.status(403).send("Forbidden");
-
-    const clubs = await clubCollection.find({ managerEmail: email }).toArray();
-    res.json(clubs);
+  // GET all clubs managed by this manager
+  app.get("/manager/my-clubs", verifyToken, verifyManager, async (req, res) => {
+    try {
+      const email = req.decoded.email;
+      const clubs = await clubCollection
+        .find({ managerEmail: email })
+        .toArray();
+      res.json(clubs);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Server error" });
+    }
   });
-  // Create a new club
-  app.post("/manager/create-club", verifyToken, async (req, res) => {
-    const { clubName, location, managerEmail } = req.body;
-    if (req.decoded.email !== managerEmail || req.decoded.role !== "manager")
-      return res.status(403).send("Forbidden");
 
-    const newClub = {
-      clubName,
-      location,
-      managerEmail,
-      status: "pending", // admin will approve
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+  // CREATE new club
+  app.post(
+    "/manager/create-club",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      try {
+        const { clubName, location, description, membershipFee } = req.body;
+        const managerEmail = req.decoded.email;
 
-    const result = await clubCollection.insertOne(newClub);
-    res.json(result);
-  });
-  // Get events for manager's clubs
-  app.get("/manager/my-events", verifyToken, async (req, res) => {
-    const email = req.query.email;
-    if (req.decoded.email !== email || req.decoded.role !== "manager")
-      return res.status(403).send("Forbidden");
+        const newClub = {
+          clubName,
+          location,
+          description: description || "",
+          membershipFee: membershipFee || 0,
+          managerEmail,
+          status: "pending",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
 
-    // Find all clubs by this manager
-    const clubs = await clubCollection.find({ managerEmail: email }).toArray();
-    const clubIds = clubs.map((c) => c._id);
+        const result = await clubCollection.insertOne(newClub);
+        res.json({ success: true, club: result });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    }
+  );
 
-    // Fetch events for these clubs
-    const events = await eventCollection
-      .find({ clubId: { $in: clubIds } })
-      .toArray();
-    res.json(events);
-  });
+  // UPDATE existing club
+  app.put(
+    "/manager/my-clubs/:id",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      try {
+        const clubId = req.params.id;
+        const updateData = req.body;
+
+        const club = await clubCollection.findOne({
+          _id: new ObjectId(clubId),
+        });
+        if (!club) return res.status(404).json({ message: "Club not found" });
+
+        if (req.decoded.email !== club.managerEmail)
+          return res.status(403).json({ message: "Forbidden" });
+
+        await clubCollection.updateOne(
+          { _id: new ObjectId(clubId) },
+          { $set: updateData }
+        );
+        res.json({ success: true, message: "Club updated" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    }
+  );
+
+  // DELETE club
+  app.delete(
+    "/manager/my-clubs/:id",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      try {
+        const clubId = req.params.id;
+        const club = await clubCollection.findOne({
+          _id: new ObjectId(clubId),
+        });
+        if (!club) return res.status(404).json({ message: "Club not found" });
+
+        if (req.decoded.email !== club.managerEmail)
+          return res.status(403).json({ message: "Forbidden" });
+
+        await clubCollection.deleteOne({ _id: new ObjectId(clubId) });
+        res.json({ success: true, message: "Club deleted" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
+    }
+  );
+
+  app.get(
+    "/manager/my-events",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      const email = req.query.email;
+      if (req.decoded.email !== email || req.decoded.role !== "clubManager")
+        return res.status(403).send("Forbidden");
+
+      // Find all clubs by this manager
+      const clubs = await clubCollection
+        .find({ managerEmail: email })
+        .toArray();
+      const clubIds = clubs.map((c) => c._id);
+
+      // Fetch events for these clubs
+      const events = await eventCollection
+        .find({ clubId: { $in: clubIds } })
+        .toArray();
+      res.json(events);
+    }
+  );
 
   // Create event
-  app.post("/manager/create-event", verifyToken, async (req, res) => {
-    const {
-      title,
-      description,
-      eventDate,
-      location,
-      isPaid,
-      eventFee,
-      managerEmail,
-    } = req.body;
+  app.post(
+    "/manager/create-event",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      const {
+        title,
+        description,
+        eventDate,
+        location,
+        isPaid,
+        eventFee,
+        managerEmail,
+      } = req.body;
 
-    if (req.decoded.email !== managerEmail || req.decoded.role !== "manager")
-      return res.status(403).send("Forbidden");
+      if (req.decoded.role !== "clubManager")
+        return res.status(403).send("Forbidden");
 
-    // Find a club by this manager to link
-    const club = await clubCollection.findOne({ managerEmail });
-    if (!club) return res.status(404).send("Club not found");
+      const { clubId } = req.body;
+      const club = await clubCollection.findOne({
+        _id: new ObjectId(clubId),
+        managerEmail: req.decoded.email,
+      });
 
-    const newEvent = {
-      clubId: club._id,
-      title,
-      description,
-      eventDate: new Date(eventDate),
-      location,
-      isPaid,
-      eventFee: isPaid ? eventFee : 0,
-      createdAt: new Date(),
-    };
+      if (!club) return res.status(403).send("Invalid club");
 
-    const result = await eventCollection.insertOne(newEvent);
-    res.json(result);
-  });
+      const newEvent = {
+        clubId: club._id,
+        title,
+        description,
+        eventDate: new Date(eventDate),
+        location,
+        isPaid,
+        eventFee: isPaid ? eventFee : 0,
+        createdAt: new Date(),
+      };
+
+      const result = await eventCollection.insertOne(newEvent);
+      res.json(result);
+    }
+  );
   // Get registrations for manager's events
-  app.get("/manager/event-registrations", verifyToken, async (req, res) => {
+  app.get("/event-registrations", verifyToken, async (req, res) => {
     const email = req.query.email;
-    if (req.decoded.email !== email || req.decoded.role !== "manager")
+    if (req.decoded.email !== email || req.decoded.role !== "clubManager")
       return res.status(403).send("Forbidden");
 
     // Get manager's clubs
@@ -612,7 +721,7 @@ async function run() {
     const eventIds = events.map((e) => e._id);
 
     // Get registrations for these events
-    const registrations = await eventRegistrationsCollection
+    const registrations = await registrationCollection
       .find({ eventId: { $in: eventIds } })
       .toArray();
 
@@ -635,7 +744,7 @@ async function run() {
     const registrationId = req.params.id;
     const { status } = req.body;
 
-    const reg = await eventRegistrationsCollection.findOne({
+    const reg = await registrationCollection.findOne({
       _id: new ObjectId(registrationId),
     });
 
@@ -648,52 +757,166 @@ async function run() {
     if (req.decoded.email !== club.managerEmail)
       return res.status(403).send("Forbidden");
 
-    const result = await eventRegistrationsCollection.updateOne(
+    const result = await registrationCollection.updateOne(
       { _id: new ObjectId(registrationId) },
       { $set: { status } }
     );
     res.json(result);
   });
 
-  // Update club
-  app.put("/manager/my-clubs/:id", verifyToken, async (req, res) => {
-    const clubId = req.params.id;
-    const updateData = req.body;
+  //admin approved
+  app.post(
+    "/admin/approve-manager/:uid",
+    verifyToken,
+    verifyAdmin,
+    async (req, res) => {
+      const uid = req.params.uid;
 
-    const club = await clubCollection.findOne({ _id: new ObjectId(clubId) });
-    if (!club) return res.status(404).send("Club not found");
-    if (req.decoded.email !== club.managerEmail)
-      return res.status(403).send("Forbidden");
+      // Firebase custom claim
+      await admin.auth().setCustomUserClaims(uid, { role: "clubManager" });
+      await userCollection.updateOne(
+        { uid },
+        { $set: { role: "clubManager" } }
+      );
 
-    const result = await clubCollection.updateOne(
-      { _id: new ObjectId(clubId) },
-      { $set: updateData }
-    );
+      res.json({ message: "Manager approved" });
+    }
+  );
 
-    res.json(result);
+  app.post(
+    "/admin/set-admin/:uid",
+    verifyToken,
+    verifyAdmin,
+    async (req, res) => {
+      if (req.decoded.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      const uid = req.params.uid;
+
+      await admin.auth().setCustomUserClaims(uid, { role: "admin" });
+      await userCollection.updateOne({ uid }, { $set: { role: "admin" } });
+
+      res.json({ message: "Admin role assigned" });
+    }
+  );
+
+  app.get("/admin/overview", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+      const totalUsers = await userCollection.countDocuments();
+      const totalClubs = await clubCollection.countDocuments();
+
+      const pendingClubs = await clubCollection.countDocuments({
+        status: "pending",
+      });
+      const approvedClubs = await clubCollection.countDocuments({
+        status: "approved",
+      });
+      const rejectedClubs = await clubCollection.countDocuments({
+        status: "rejected",
+      });
+
+      const totalEvents = await eventCollection.countDocuments();
+      const totalMembers = await membershipsCollection.countDocuments();
+
+      const payments = await paymentCollection.find().toArray();
+      const totalPayments = payments.reduce(
+        (sum, p) => sum + (p.amount || 0),
+        0
+      );
+
+      res.json({
+        totalUsers,
+        totalClubs,
+        pendingClubs,
+        approvedClubs,
+        rejectedClubs,
+        totalEvents,
+        totalMembers,
+        totalPayments,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Server error" });
+    }
   });
 
-  //admin approved
-  app.post("/admin/approve-manager/:uid", verifyToken, async (req, res) => {
-    const adminUser = req.decoded;
+  app.get("/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+    const users = await userCollection.find().toArray();
+    res.json(users);
+  });
 
-    if (adminUser.role !== "admin") {
+  app.put("/admin/users/:uid", verifyToken, verifyAdmin, async (req, res) => {
+    const email = req.decoded.email;
+    const adminUser = await userCollection.findOne({ email });
+
+    if (!adminUser || adminUser.role !== "admin") {
       return res.status(403).json({ message: "Forbidden: Admin only" });
     }
 
-    const uid = req.params.uid;
+    const { uid } = req.params;
+    const { role } = req.body;
 
+    await admin.auth().setCustomUserClaims(uid, { role });
+    const result = await userCollection.updateOne({ uid }, { $set: { role } });
+
+    res.json({ message: "User role updated", result });
+  });
+
+  app.delete(
+    "/admin/users/:uid",
+    verifyToken,
+    verifyAdmin,
+    async (req, res) => {
+      if (req.decoded.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden: Admin only" });
+      }
+
+      const { uid } = req.params;
+
+      // Delete from Firebase
+      await admin.auth().deleteUser(uid);
+
+      // Delete from MongoDB
+      const result = await userCollection.deleteOne({ uid });
+
+      res.json({ message: "User deleted successfully", result });
+    }
+  );
+
+  app.patch("/admin/clubs/:id", verifyToken, verifyAdmin, async (req, res) => {
+    if (req.decoded.role !== "admin")
+      return res.status(403).json({ message: "Forbidden" });
+    const { id } = req.params;
+    const { status } = req.body;
+    const result = await clubCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status } }
+    );
+    res.json(result);
+  });
+
+  app.get("/admin/payments", verifyToken, verifyAdmin, async (req, res) => {
     try {
-      // Firebase তে role update
-      await admin.auth().setCustomUserClaims(uid, { role: "manager" });
-
-      // Database তে role update
-      await userCollection.updateOne({ uid }, { $set: { role: "manager" } });
-
-      res.json({ message: "User approved as manager successfully" });
+      const payments = await paymentCollection
+        .find()
+        .sort({ createdAt: -1 })
+        .toArray();
+      res.json(payments);
     } catch (err) {
       console.error(err);
-      res.status(500).json({ message: "Failed to approve manager" });
+      res.status(500).json({ message: "Server error" });
+    }
+  });
+
+  // Fetch all clubs
+  app.get("/admin/clubs", verifyToken, verifyAdmin, async (req, res) => {
+    try {
+      const clubs = await clubCollection.find().toArray();
+      res.json(clubs);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ message: "Server error" });
     }
   });
 
