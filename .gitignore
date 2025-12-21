@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 clubsphere-firebase-adminsdk.json
 serviceAccountKey.json
+.vercel
