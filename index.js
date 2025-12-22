@@ -98,7 +98,6 @@ async function run() {
     next();
   };
   const verifyManager = (req, res, next) => {
-    // console.log(req.decoded.role);
     if (req.decoded.role !== "clubManager") {
       return res.status(403).json({ message: "Forbidden: Manager only" });
     }
@@ -167,11 +166,40 @@ async function run() {
     }
   });
 
+  // app.get("/club", async (req, res) => {
+  //   const clubs = await clubCollection.find().toArray();
+  //   res.json(clubs);
+  // });
   app.get("/club", async (req, res) => {
-    const clubs = await clubCollection.find().toArray();
-    res.json(clubs);
-  });
+    try {
+      const { search, category, sort } = req.query;
+      let query = {};
 
+      if (search) {
+        query.clubName = { $regex: search, $options: "i" };
+      }
+
+      if (category) {
+        query.category = category;
+      }
+
+      let sortOptions = {};
+      if (sort === "lowestFee") sortOptions = { membershipFee: 1 };
+      else if (sort === "highestFee") sortOptions = { membershipFee: -1 };
+      else if (sort === "newest") sortOptions = { createdAt: -1 };
+      else if (sort === "oldest") sortOptions = { createdAt: 1 };
+      else sortOptions = { createdAt: -1 };
+
+      const clubs = await clubCollection
+        .find(query)
+        .sort(sortOptions)
+        .toArray();
+
+      res.json(clubs);
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching clubs" });
+    }
+  });
   app.get("/club/:id", async (req, res) => {
     const id = req.params.id;
     if (!ObjectId.isValid(id))
@@ -192,11 +220,34 @@ async function run() {
     res.json(featured);
   });
 
-  app.get("/events", async (req, res) => {
-    const events = await eventCollection.find({}).toArray();
-    res.json(events);
-  });
+  // app.get("/events", async (req, res) => {
+  //   const events = await eventCollection.find({}).toArray();
+  //   res.json(events);
+  // });
 
+  app.get("/events", async (req, res) => {
+    try {
+      const { search, category } = req.query;
+      let query = {};
+
+      if (search) {
+        query.title = { $regex: search, $options: "i" };
+      }
+
+      if (category) {
+        query.category = category;
+      }
+
+      const events = await eventCollection
+        .find(query)
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.json(events);
+    } catch (err) {
+      res.status(500).json({ message: "Error fetching events" });
+    }
+  });
   app.get("/events/:id", async (req, res) => {
     const id = req.params.id;
     if (!ObjectId.isValid(id))
@@ -1001,94 +1052,89 @@ async function run() {
     }
   });
 
-  // GET Event Registrations for Manager
-  app.get("/manager/event-registrations", verifyToken, async (req, res) => {
-    try {
-      const managerEmail = req.decoded.email;
-      if (req.decoded.role !== "clubManager")
-        return res.status(403).send("Forbidden");
+  app.get(
+    "/manager/event-registrations",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      try {
+        const managerEmail = req.decoded.email;
+        const db = client.db("ClubSphereDb");
 
-      const db = client.db("ClubSphereDb");
+        // Fetch manager's approved clubs
+        const clubs = await db
+          .collection("club")
+          .find({ managerEmail, status: "approved" })
+          .toArray();
 
-      // Fetch manager's approved clubs
-      const clubs = await db
-        .collection("club")
-        .find({ managerEmail, status: "approved" })
-        .toArray();
+        if (!clubs.length) return res.json([]);
+        const clubNames = clubs.map((c) => c.clubName);
 
-      if (!clubs.length) return res.json([]);
+        // Fetch events for these clubs
+        const events = await db
+          .collection("events")
+          .find({ clubId: { $in: clubNames } })
+          .toArray();
 
-      // Use clubName because events.collection uses string clubId
-      const clubNames = clubs.map((c) => c.clubName);
+        if (!events.length) return res.json([]);
+        const eventIds = events.map((e) => e._id.toString());
 
-      // Fetch events for these clubs
-      const events = await db
-        .collection("events")
-        .find({ clubId: { $in: clubNames } })
-        .toArray();
+        // Fetch registrations
+        const registrations = await db
+          .collection("eventRegistrations")
+          .find({ eventId: { $in: eventIds } })
+          .toArray();
 
-      if (!events.length) return res.json([]);
+        const registrationsWithEvent = registrations.map((reg) => {
+          const event = events.find(
+            (e) => e._id.toString() === reg.eventId.toString()
+          );
+          return {
+            _id: reg._id,
+            userEmail: reg.userEmail,
+            status: reg.status,
+            registeredAt: reg.registeredAt,
+            eventTitle: event?.title || "Unknown Event",
+            clubName: event?.clubId || "Unknown Club",
+          };
+        });
 
-      const eventIds = events.map((e) => e._id.toString());
-
-      // Fetch registrations
-      const registrations = await db
-        .collection("eventRegistrations")
-        .find({ eventId: { $in: eventIds } })
-        .toArray();
-
-      // Attach event title and clubName
-      const registrationsWithEvent = registrations.map((reg) => {
-        const event = events.find(
-          (e) => e._id.toString() === reg.eventId.toString()
-        );
-        return {
-          _id: reg._id,
-          userEmail: reg.userEmail,
-          status: reg.status,
-          registeredAt: reg.registeredAt,
-          eventTitle: event?.title || "Unknown Event",
-          clubName: event?.clubId || "Unknown Club",
-        };
-      });
-
-      res.json(registrationsWithEvent);
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Server error" });
+        res.json(registrationsWithEvent);
+      } catch (err) {
+        res.status(500).json({ message: "Server error" });
+      }
     }
-  });
+  );
 
-  // PUT Update Event Registration Status
-  app.put("/manager/event-registrations/:id", verifyToken, async (req, res) => {
-    try {
-      const registrationId = req.params.id;
-      const { status } = req.body;
-      const db = client.db("ClubSphereDb");
+  app.put(
+    "/manager/event-registrations/:id",
+    verifyToken,
+    verifyManager,
+    async (req, res) => {
+      try {
+        const registrationId = req.params.id;
+        const { status } = req.body;
+        const db = client.db("ClubSphereDb");
 
-      const reg = await db
-        .collection("eventRegistrations")
-        .findOne({ _id: new ObjectId(registrationId) });
-      if (!reg) return res.status(404).send("Registration not found");
+        const reg = await db
+          .collection("eventRegistrations")
+          .findOne({ _id: new ObjectId(registrationId) });
 
-      // Find club to verify manager
-      const club = await db
-        .collection("club")
-        .findOne({ clubName: reg.clubId });
-      if (!club || club.managerEmail !== req.decoded.email)
-        return res.status(403).send("Forbidden");
+        if (!reg) return res.status(404).send("Registration not found");
 
-      await db
-        .collection("eventRegistrations")
-        .updateOne({ _id: new ObjectId(registrationId) }, { $set: { status } });
+        await db
+          .collection("eventRegistrations")
+          .updateOne(
+            { _id: new ObjectId(registrationId) },
+            { $set: { status } }
+          );
 
-      res.json({ message: "Status updated successfully" });
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Server error" });
+        res.json({ message: "Status updated successfully" });
+      } catch (err) {
+        res.status(500).json({ message: "Server error" });
+      }
     }
-  });
-
+  );
   app.post(
     "/admin/promote-user/:uid",
     verifyToken,
@@ -1251,4 +1297,5 @@ async function run() {
 app.get("/", (req, res) => res.send("My ClubSphere server is running..."));
 run();
 
-app.listen(port, () => console.log(`Server running on port ${port}`));
+// app.listen(port, () => console.log(`Server running on port ${port}`));
+module.exports = app;
